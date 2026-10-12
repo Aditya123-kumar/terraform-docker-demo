@@ -96,7 +96,7 @@ pipeline {
 
         stage('Manual Approval') {
             steps {
-                timeout(time: 5, unit: 'MINUTES') {
+                timeout(time: 15, unit: 'MINUTES') {
                     input(
                         message: 'Review the Terraform plan. Approve only if it creates the three isolated demo resources and changes or destroys nothing.',
                         ok: 'Approve Apply'
