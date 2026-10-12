@@ -1,0 +1,5 @@
+nginx_apps = {
+  blue  = 8100
+  green = 8101
+  test  = 8102
+}
