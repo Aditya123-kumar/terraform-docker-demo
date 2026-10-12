@@ -1,0 +1,107 @@
+pipeline {
+agent any
+
+```
+options {
+    timestamps()
+    disableConcurrentBuilds()
+    timeout(time: 20, unit: 'MINUTES')
+}
+
+environment {
+    TF_IN_AUTOMATION = 'true'
+}
+
+stages {
+    stage('Checkout') {
+        steps {
+            checkout scm
+        }
+    }
+
+    stage('Terraform Init') {
+        steps {
+            bat 'terraform init -input=false'
+        }
+    }
+
+    stage('Format and Validate') {
+        steps {
+            bat 'terraform fmt -check'
+            bat 'terraform validate'
+        }
+    }
+
+    stage('Terraform Plan') {
+        steps {
+            bat 'terraform plan -input=false -out=demo.tfplan'
+            bat 'terraform show -no-color demo.tfplan'
+            bat 'terraform show -json demo.tfplan > demo-plan.json'
+        }
+    }
+
+    stage('Safety Check') {
+        steps {
+            powershell '''
+                $ErrorActionPreference = "Stop"
+                $plan = Get-Content "demo-plan.json" -Raw | ConvertFrom-Json
+
+                $allowed = @(
+                    "docker_image.demo",
+                    "docker_network.demo",
+                    "docker_container.demo"
+                )
+
+                foreach ($resource in $plan.resource_changes) {
+                    $actions = $resource.change.actions -join ","
+
+                    if ($resource.address -notin $allowed) {
+                        throw "BLOCKED: Unexpected resource: $($resource.address)"
+                    }
+
+                    if ($actions -notin @("create", "no-op")) {
+                        throw "BLOCKED: Unsafe action '$actions' on $($resource.address)"
+                    }
+                }
+
+                Write-Host "Safety check passed: only approved demo resources may be created or left unchanged."
+            '''
+        }
+    }
+
+    stage('Manual Approval') {
+        steps {
+            timeout(time: 5, unit: 'MINUTES') {
+                input(
+                    message: 'Review the Terraform plan. Approve only if it creates the three isolated demo resources and destroys or changes nothing.',
+                    ok: 'Approve Apply',
+                    submitter: 'admin'
+                )
+            }
+        }
+    }
+
+    stage('Terraform Apply') {
+        steps {
+            bat 'terraform apply -input=false -auto-approve demo.tfplan'
+        }
+    }
+
+    stage('Verify Deployment') {
+        steps {
+            bat 'terraform output'
+            bat 'docker ps --filter "name=jenkins-approval-demo-nginx"'
+            bat 'curl.exe --fail http://localhost:18080'
+        }
+    }
+}
+
+post {
+    always {
+        bat 'if exist demo.tfplan del /q demo.tfplan'
+        bat 'if exist demo-plan.json del /q demo-plan.json'
+    }
+}
+```
+
+}
