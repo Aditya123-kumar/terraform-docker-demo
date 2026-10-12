@@ -1,29 +1,143 @@
 pipeline {
-agent any
+    agent any
 
-options {
-    timestamps()
-    disableConcurrentBuilds()
-    timeout(time: 20, unit: 'MINUTES')
-}
-
-environment {
-    TF_IN_AUTOMATION = 'true'
-}
-
-stages {
-    stage('Checkout') {
-        steps {
-            checkout scm
-        }
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 20, unit: 'MINUTES')
     }
 
-    stage('Terraform Init') {
-        steps {
-            dir('jenkins-isolated') {
-                bat 'terraform init -input=false'
+    environment {
+        TF_IN_AUTOMATION = 'true'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                dir('jenkins-isolated') {
+                    bat 'terraform init -input=false'
+                }
+            }
+        }
+
+        stage('Terraform Format Check') {
+            steps {
+                dir('jenkins-isolated') {
+                    bat 'terraform fmt -check'
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                dir('jenkins-isolated') {
+                    bat 'terraform validate'
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                dir('jenkins-isolated') {
+                    bat 'terraform plan -input=false -out=demo.tfplan'
+                    bat 'terraform show -no-color demo.tfplan'
+                    bat 'terraform show -json demo.tfplan > demo-plan.json'
+                }
+            }
+        }
+
+        stage('Safety Check') {
+            steps {
+                dir('jenkins-isolated') {
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
+                        $plan = Get-Content "demo-plan.json" -Raw | ConvertFrom-Json
+
+                        $allowed = @(
+                            "docker_image.demo",
+                            "docker_network.demo",
+                            "docker_container.demo"
+                        )
+
+                        foreach ($resource in $plan.resource_changes) {
+                            $address = $resource.address
+                            $actions = $resource.change.actions -join ","
+
+                            if ($address -notin $allowed) {
+                                throw "BLOCKED: Unexpected resource $address"
+                            }
+
+                            if ($actions -notin @("create", "no-op")) {
+                                throw "BLOCKED: Unsafe action $actions on $address"
+                            }
+                        }
+
+                        foreach ($required in $allowed) {
+                            $found = $plan.resource_changes | Where-Object {
+                                $_.address -eq $required
+                            }
+
+                            if (-not $found) {
+                                throw "BLOCKED: Missing resource $required"
+                            }
+                        }
+
+                        Write-Host "Safety check passed."
+                    '''
+                }
+            }
+        }
+
+        stage('Manual Approval') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    input(
+                        message: 'Review the Terraform plan. Approve only if it creates the three isolated demo resources and changes or destroys nothing.',
+                        ok: 'Approve Apply'
+                    )
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                dir('jenkins-isolated') {
+                    bat 'terraform apply -input=false -auto-approve demo.tfplan'
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                dir('jenkins-isolated') {
+                    bat 'terraform output'
+                    bat 'docker ps --filter "name=jenkins-approval-demo-nginx"'
+                    bat 'curl.exe --fail http://localhost:18080'
+                }
             }
         }
     }
 
-    stage('Terraform Format
+    post {
+        always {
+            dir('jenkins-isolated') {
+                bat 'if exist demo.tfplan del /q demo.tfplan'
+                bat 'if exist demo-plan.json del /q demo-plan.json'
+            }
+        }
+
+        success {
+            echo 'Terraform demo deployment completed successfully.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check the Console Output.'
+        }
+    }
+}
